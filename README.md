@@ -162,6 +162,98 @@ All endpoints require `Authorization: Bearer <token>` header.
 
 ---
 
+## OAuth 2.1 Flow (Claude Connectors)
+
+This is how users authorize Claude Desktop (or any MCP client) to access their Onscript account.
+
+### The Flow
+
+```
+Claude Desktop                    Backend (mcp.onscript.xyz)              Frontend (app.onscript.xyz)
+     |                                    |                                      |
+     |-- GET /mcp/authorize ----------->  |                                      |
+     |   (no token yet)                   |                                      |
+     |                                    |-- 401 + WWW-Authenticate ----------> |
+     |                                    |   (points to .well-known metadata)   |
+     |                                    |                                      |
+     |-- GET /.well-known/... ---------->|                                      |
+     |<-- { auth server URL } -----------|                                      |
+     |                                    |                                      |
+     |-- GET /mcp/authorize?state=... -->|------------------------------------->|
+     |                                    |   (consent page in browser)          |
+     |                                    |                                      |
+     |                                    |<-- POST /auth/mcp/authorize --------|
+     |                                    |    (issues authorization code)       |
+     |                                    |                                      |
+     |-- POST /auth/mcp/token ---------->|
+     |   { code, code_verifier }         |
+     |<-- { access_token, refresh_token }|                                      |
+     |                                    |                                      |
+     |-- Bearer token on all requests -->|
+```
+
+### Routes to Build
+
+| Route | Method | What It Does | Status |
+|---|---|---|---|
+| `/.well-known/oauth-protected-resource` | GET | Static JSON — tells Claude where to auth | [TODO #269](https://github.com/OnscriptSocialFi/backend/issues/269) |
+| `/.well-known/oauth-authorization-server` | GET | Static JSON — auth server endpoints | [TODO #269](https://github.com/OnscriptSocialFi/backend/issues/269) |
+| `/auth/mcp/authorize` | GET | Show consent page (redirect to frontend) | [TODO #268](https://github.com/OnscriptSocialFi/backend/issues/268) |
+| `/auth/mcp/authorize` | POST | Issue authorization code, redirect back to Claude | [TODO #268](https://github.com/OnscriptSocialFi/backend/issues/268) |
+| `/auth/mcp/token` | POST | Exchange code + PKCE for access_token + refresh_token | [TODO #268](https://github.com/OnscriptSocialFi/backend/issues/268) |
+| `/auth/mcp/refresh` | POST | Exchange refresh_token for new access_token | [TODO #268](https://github.com/OnscriptSocialFi/backend/issues/268) |
+| `/auth/mcp/revoke` | POST | Revoke tokens (user disconnects) | [TODO #268](https://github.com/OnscriptSocialFi/backend/issues/268) |
+
+### Protected Resource Metadata Response
+
+```json
+{
+  "resource": "https://mcp.onscript.xyz/mcp",
+  "bearer_methods_supported": ["header"],
+  "authorization_servers": ["https://app.onscript.xyz"],
+  "scopes_supported": ["mcp:tools:read", "mcp:tools:write"]
+}
+```
+
+### Auth Server Metadata Response
+
+```json
+{
+  "issuer": "https://app.onscript.xyz",
+  "authorization_endpoint": "https://app.onscript.xyz/mcp/authorize",
+  "token_endpoint": "https://mcp.onscript.xyz/auth/mcp/token",
+  "response_types_supported": ["code"],
+  "code_challenge_methods_supported": ["S256"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
+  "scopes_supported": ["mcp:tools:read", "mcp:tools:write"]
+}
+```
+
+### Token Exchange Details
+
+- Validate authorization code + PKCE code_verifier (S256)
+- Issue JWT access_token (1 hour expiry) + refresh_token (7 days)
+- JWT claims: `sub` (user_id), `aud` (mcp.onscript.xyz), `scope`, `exp`, `iat`
+- Refresh token rotated on use
+- Cron job cleans revoked/expired tokens every 5 minutes
+
+### DB Table: `mcp_tokens`
+
+| Column | Type | Purpose |
+|---|---|---|
+| `id` | TEXT (ULID) | Token ID |
+| `user_id` | TEXT | FK to users |
+| `access_token` | TEXT | Hashed JWT |
+| `refresh_token` | TEXT | Hashed refresh token |
+| `client_id` | TEXT | MCP client identifier |
+| `scope` | TEXT | Granted scopes |
+| `expires_at` | INTEGER | Access token expiry (epoch) |
+| `refresh_expires_at` | INTEGER | Refresh token expiry (epoch) |
+| `created_at` | INTEGER | Creation timestamp |
+| `revoked_at` | INTEGER | Revocation timestamp (nullable) |
+
+---
+
 ## Production Deployment
 
 See `idea.md` for the full production plan. Summary:
