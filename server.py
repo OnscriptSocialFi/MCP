@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlencode
-
+from mcp.types import Icon
 import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -42,7 +42,7 @@ def log(*args: Any) -> None:
     print("[mcp]", *args, file=sys.stderr, flush=True)
 
 
-mcp = FastMCP(name="onscript-mcp",website_url="https://onscript.xyz",icons=[Icon(src="./onscript.png")])
+mcp = FastMCP(name="onscript-mcp",website_url="https://onscript.xyz",icons=[Icon(src="./onscript.png", mime_type="image/png")])
 
 
 # ── Save token to .env ──
