@@ -30,7 +30,7 @@ ENV_PATH = HERE / ".env"
 
 load_dotenv(ENV_PATH)
 
-BACKEND_URL = os.environ.get("BACKEND_URL", "http://172.21.208.142:5000")
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:3007")
 TOKEN_PORT = int(os.environ.get("TOKEN_PORT", "3099"))
 
 _access_token: str = os.environ.get("ACCESS_TOKEN", "")
