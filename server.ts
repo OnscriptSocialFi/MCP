@@ -36,7 +36,7 @@ function saveToken(token: string) {
   ACCESS_TOKEN = token;
   log(`Token saved: ${token.substring(0, 16)}...`);
   // Notify subscribed MCP clients that the token changed
-  try { server.sendResourceUpdated("onscript://token-status"); } catch {}
+  try { server.sendResourceUpdated("onscript://token-status"); } catch { }
 }
 
 // ── Token server ──
