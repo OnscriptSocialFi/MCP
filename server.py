@@ -25,13 +25,11 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 from typing_extensions import Annotated
 
-HERE = Path(__file__).resolve().parent
-ENV_PATH = HERE / ".env"
 
-load_dotenv(ENV_PATH)
+load_dotenv()
 
-BACKEND_URL = os.environ.get("BACKEND_URL", "http://172.21.208.142:5000")
-TOKEN_PORT = int(os.environ.get("TOKEN_PORT", "3099"))
+BACKEND_URL = os.getenv("BACKEND_URL")
+TOKEN_PORT = int(os.getenv("TOKEN_PORT"))
 
 _access_token: str = os.environ.get("ACCESS_TOKEN", "")
 _token_lock = threading.Lock()
