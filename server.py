@@ -170,6 +170,13 @@ async def api(
 
 
 # ── Tools ──
+
+@mcp.tool(description="Email Sign in")
+async def email_sign_in(email:str) -> str:
+    print(email)
+    data = await api("/users/profile")
+    return json.dumps(data, indent=2)
+
 @mcp.tool(description="View your OnScript profile")
 async def get_profile() -> str:
     data = await api("/users/profile")
