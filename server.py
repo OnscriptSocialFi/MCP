@@ -28,8 +28,8 @@ from typing_extensions import Annotated
 
 load_dotenv()
 
-BACKEND_URL = os.getenv("BACKEND_URL")
-TOKEN_PORT = int(os.getenv("TOKEN_PORT"))
+BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:3007")
+TOKEN_PORT = int(os.environ.get("TOKEN_PORT", "3099"))
 
 _access_token: str = os.environ.get("ACCESS_TOKEN", "")
 _token_lock = threading.Lock()
