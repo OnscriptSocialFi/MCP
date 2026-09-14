@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlencode
-
+from mcp.types import Icon
 import httpx
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -25,10 +25,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 from typing_extensions import Annotated
 
-HERE = Path(__file__).resolve().parent
-ENV_PATH = HERE / ".env"
 
-load_dotenv(ENV_PATH)
+load_dotenv()
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:3007")
 TOKEN_PORT = int(os.environ.get("TOKEN_PORT", "3099"))
@@ -42,7 +40,7 @@ def log(*args: Any) -> None:
     print("[mcp]", *args, file=sys.stderr, flush=True)
 
 
-mcp = FastMCP(name="onscript-mcp",website_url="https://onscript.xyz",icons=[Icon(src="./onscript.png")])
+mcp = FastMCP(name="onscript-mcp",website_url="https://onscript.xyz",icons=[Icon(src="./onscript.png", mime_type="image/png")])
 
 
 # ── Save token to .env ──
