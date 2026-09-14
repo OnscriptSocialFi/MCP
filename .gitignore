@@ -2,3 +2,7 @@ node_modules/
 .env
 *.log
 *.log.*
+lib/*
+lib64/
+include/
+bin/
