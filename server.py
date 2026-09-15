@@ -1,303 +1,334 @@
-"""OnScript MCP server — Python / FastMCP port of the original TypeScript server.
-
-Mirrors the TS implementation's tools, the local token-drop HTTP server, and
-the token-status resource. One behavioral gap is called out where the two
-libraries genuinely differ — see the note above `save_token`.
-"""
-
-from __future__ import annotations
-
-import errno
+import asyncio
 import json
 import os
-import sys
-import threading
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from typing import Any, Literal, Optional
-from urllib.parse import urlencode
+from typing import List
 from mcp.types import Icon
-import httpx
+
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
-from pydantic import Field
-from typing_extensions import Annotated
+import requests
+import redis
 
+from utils import sanitize_auth_payload
 
 load_dotenv()
 
-BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:3007")
-TOKEN_PORT = int(os.environ.get("TOKEN_PORT", "3099"))
+BACKEND_URL = os.getenv("BACKEND_URL")
+MCP_URL = os.getenv("MCP_URL")
+REDIS_PORT = os.getenv("REDIS_PORT")
+# Base URL of the OnScript web app — used to build the OAuth connect link
+# that gets returned to the caller (mirrors extendsSocialsConnect on the frontend).
+FRONTEND_URL = os.getenv("FRONTEND_URL")
 
-_access_token: str = os.environ.get("ACCESS_TOKEN", "")
-_token_lock = threading.Lock()
+SUPPORTED_PLATFORMS = [
+    "TWITTER", "LINKEDIN", "TIKTOK", "FARCASTER", "FACEBOOK", "INSTAGRAM", "YOUTUBE"
+]
 
+r = redis.Redis(host='localhost', port=REDIS_PORT, decode_responses=True)
+mcp = FastMCP(name="onscript-mcp", website_url="https://onscript.xyz", icons=[Icon(src="./onscript.png", mime_type="image/png")])
 
-def log(*args: Any) -> None:
-    """Write to stderr so stdout stays clean for the MCP stdio transport."""
-    print("[mcp]", *args, file=sys.stderr, flush=True)
-
-
-mcp = FastMCP(name="onscript-mcp",website_url="https://onscript.xyz",icons=[Icon(src="./onscript.png", mime_type="image/png")])
-
-
-# ── Save token to .env ──
-def save_token(token: str) -> None:
-    global _access_token
-    lines: list[str] = []
-    found = False
-    if ENV_PATH.exists():
-        for raw in ENV_PATH.read_text().splitlines():
-            if not raw.strip():
-                continue
-            if raw.startswith("ACCESS_TOKEN="):
-                lines.append(f"ACCESS_TOKEN={token}")
-                found = True
-            else:
-                lines.append(raw)
-    if not found:
-        lines.append(f"ACCESS_TOKEN={token}")
-    ENV_PATH.write_text("\n".join(lines) + "\n")
-
-    with _token_lock:
-        _access_token = token
-    log(f"Token saved: {token[:16]}...")
-
-    # NOTE — genuine gap vs. the TS version, not an oversight:
-    # the TS `fastmcp` library's `server.sendResourceUpdated()` broadcasts to
-    # every connected session. Python's `fastmcp`/MCP SDK only exposes
-    # `ctx.session.send_resource_updated(uri)`, which needs an active request
-    # context — there isn't one here, since this fires from the token HTTP
-    # server's own thread, outside any MCP request. There's no public,
-    # supported way to reach "all current sessions" from outside a request.
-    # If clients need to learn about a token refresh, either have them poll
-    # `check_token` / read the `onscript://token-status` resource again, or
-    # track sessions yourself via server middleware and call
-    # `session.send_resource_updated(...)` per session.
-
-
-# ── Token HTTP server ──
-class _TokenRequestHandler(BaseHTTPRequestHandler):
-    def _set_cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
-    def _reply(self, status: int, body: str) -> None:
-        self.send_response(status)
-        self._set_cors()
-        self.end_headers()
-        self.wfile.write(body.encode("utf-8"))
-
-    def do_OPTIONS(self) -> None:  # noqa: N802
-        self.send_response(200)
-        self._set_cors()
-        self.end_headers()
-
-    def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/token":
-            self._reply(404, "not found")
-            return
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        raw_body = self.rfile.read(length) if length else b""
-        try:
-            payload = json.loads(raw_body or b"{}")
-        except json.JSONDecodeError:
-            log("Token server: bad JSON")
-            self._reply(400, "Bad JSON")
-            return
-
-        access_token = payload.get("access_token")
-        if not access_token:
-            log("Token server: no access_token")
-            self._reply(400, "No token")
-            return
-
-        save_token(access_token)
-        self._reply(200, "ok")
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        log(format % args)
-
-
-def start_token_server() -> Optional[ThreadingHTTPServer]:
+# Helper function to get auth data from Redis
+def get_user_auth(email: str):
+    user_data_raw = r.get(email)
+    if not user_data_raw:
+        return None, f"User with email '{email}' is not authenticated. Please sign in."
+    
     try:
-        httpd = ThreadingHTTPServer(("0.0.0.0", TOKEN_PORT), _TokenRequestHandler)
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            log(f"Token port {TOKEN_PORT} in use")
-        else:
-            log("Token server error:", exc)
-        return None
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    return httpd
+        user_data = json.loads(user_data_raw)
+        access_token = user_data.get("access_token")
+        user_id = user_data.get("user", {}).get("id")
+        
+        if not access_token:
+            return None, f"No access token found for '{email}'."
+            
+        return {"access_token": access_token, "user_id": user_id}, None
+    except Exception as e:
+        return None, f"Error parsing auth data: {str(e)}"
 
 
-# ── Call backend ──
-async def api(
-    path: str,
-    *,
-    method: str = "GET",
-    json_body: Optional[dict[str, Any]] = None,
-) -> Any:
-    if not _access_token:
-        log("No access token — sign in to webapp")
-        raise ToolError("No access token. Sign in to the webapp first.")
+# --- Existing Auth Tools ---
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.request(
-            method,
-            f"{BACKEND_URL}{path}",
+@mcp.tool
+async def email_sign_up(email: str) -> str:
+    res = requests.post(f"{BACKEND_URL}/auth/sign-in/strategy/email", json={"email": email})
+    if res.status_code != 200:
+        return "email auth sign up failed, please use a valid email address or try again later"
+    return "email sign up successful please put in the otp code sent to your email"
+
+@mcp.tool
+async def email_otp_verification(email: str, otp: str) -> str:
+    res = requests.post(f"{BACKEND_URL}/auth/verification", json={"email": email, "otp": otp})
+    if res.status_code != 200:
+        return "email auth otp verification failed, please check you actually have used the right email sent otp code"
+    res_ = res.json()
+    r.set(email, json.dumps(res_))
+    return "verification successful"
+
+@mcp.tool
+async def email_sign_in(email: str) -> str:
+    res = requests.post(f"{BACKEND_URL}/auth/sign-in/strategy/email", json={"email": email})
+    if res.status_code != 200:
+        return "email auth sign in failed, please check you actually have an account"
+    return "email sign in successful, please input the otp sent to your email"
+
+@mcp.tool
+async def isauthenticated_status(email: str) -> str:
+    return "Not authenticated"
+
+@mcp.tool
+async def get_user_profile(email: str) -> str:
+    res_ = sanitize_auth_payload(r.get(email))
+    return f"Here is information on the user's profile {res_}"
+
+@mcp.tool
+async def get_stats(email: str) -> str:
+    auth, err = get_user_auth(email)
+    if err: return err
+    try:
+        res = requests.get(f"{BACKEND_URL}/users/profile/analytics", headers={"Authorization": f"Bearer {auth['access_token']}"})
+        if res.status_code != 200: return f"Failed to retrieve stats. Status: {res.status_code}"
+        return f"User Analytics Stats:\n{json.dumps(res.json(), indent=2)}"
+    except Exception as e:
+        return f"Error fetching stats: {str(e)}"
+
+
+# --- Social Account Integration Tools ---
+
+@mcp.tool
+async def get_connected_accounts(email: str) -> str:
+    """Fetches the list of social accounts currently connected for the user."""
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    try:
+        res = requests.get(
+            f"{BACKEND_URL}/integrations/connected-accounts",
+            headers={"Authorization": f"Bearer {auth['access_token']}"}
+        )
+        if res.status_code != 200:
+            return f"Failed to fetch connected accounts. Status: {res.status_code}."
+        return f"Connected accounts:\n{json.dumps(res.json(), indent=2)}"
+    except Exception as e:
+        return f"An error occurred while fetching connected accounts: {str(e)}"
+
+
+@mcp.tool
+async def connect_social_account(email: str, platform: str) -> str:
+    """
+    Generates an OAuth connect link for the given platform.
+    platform should be one of: TWITTER, LINKEDIN, TIKTOK, FARCASTER, FACEBOOK, INSTAGRAM, YOUTUBE.
+    Open the returned URL in a browser (signed in as the same user) to authorize and link the account.
+    """
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    platform = platform.upper()
+    if platform not in SUPPORTED_PLATFORMS:
+        return f"Unsupported platform '{platform}'. Choose from: {', '.join(SUPPORTED_PLATFORMS)}"
+
+    if not FRONTEND_URL:
+        return "FRONTEND_URL is not configured on the MCP server, so I can't build a connect link."
+
+    connect_url = f"{FRONTEND_URL}/integrations/{platform.lower()}/oauth/callback?token={auth['access_token']}"
+    return f"Open this link in your browser to connect {platform}:\n{connect_url}"
+
+
+@mcp.tool
+async def disconnect_social_account(email: str, account_id: str) -> str:
+    """Disconnects a previously connected social account by its connected-account id."""
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    try:
+        res = requests.post(
+            f"{BACKEND_URL}/integrations/disconnect",
+            json={"account_id": account_id},
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {_access_token}",
-            },
-            json=json_body,
+                "Authorization": f"Bearer {auth['access_token']}"
+            }
+        )
+        if res.status_code not in [200, 204]:
+            return f"Failed to disconnect account '{account_id}'. Status: {res.status_code}."
+        return f"Successfully disconnected account '{account_id}'."
+    except Exception as e:
+        return f"An error occurred while disconnecting the account: {str(e)}"
+
+
+# --- New Cross-Posting Tools ---
+
+@mcp.tool
+async def get_posts(email: str, page: int = 1, per_page: int = 10) -> str:
+    """Fetches a paginated list of posts created by the user."""
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    try:
+        url = f"{BACKEND_URL}/posts?page={page}&per_page={per_page}&from_user={auth['user_id']}"
+        res = requests.get(url, headers={"Authorization": f"Bearer {auth['access_token']}"})
+        
+        if res.status_code != 200:
+            return f"Failed to fetch posts. Backend returned status {res.status_code}."
+            
+        return f"Posts retrieved successfully:\n{json.dumps(res.json(), indent=2)}"
+    except Exception as e:
+        return f"An error occurred while fetching posts: {str(e)}"
+
+
+@mcp.tool
+async def delete_post(email: str, post_id: str) -> str:
+    """Deletes a specific post by its ID."""
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    try:
+        res = requests.delete(
+            f"{BACKEND_URL}/posts/{post_id}",
+            headers={"Authorization": f"Bearer {auth['access_token']}"}
+        )
+        
+        if res.status_code not in [200, 204]:
+            return f"Failed to delete post '{post_id}'. Status: {res.status_code}."
+            
+        return f"Successfully deleted post '{post_id}'."
+    except Exception as e:
+        return f"An error occurred while deleting the post: {str(e)}"
+
+
+@mcp.tool
+async def retry_post(email: str, post_id: str) -> str:
+    """Retries a failed cross-post publishing attempt."""
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    try:
+        res = requests.post(
+            f"{BACKEND_URL}/posts/{post_id}/retry",
+            headers={"Authorization": f"Bearer {auth['access_token']}"}
+        )
+        
+        if res.status_code != 200 and res.status_code != 201:
+            return f"Failed to retry post '{post_id}'. Status: {res.status_code}."
+            
+        return f"Successfully initiated retry for post '{post_id}':\n{json.dumps(res.json(), indent=2)}"
+    except Exception as e:
+        return f"An error occurred while retrying the post: {str(e)}"
+
+
+@mcp.tool
+async def publish_post(email: str, post_id: str, scheduled_at: int = None) -> str:
+    """
+    Publishes a drafted post, pushing it live to its target platform(s).
+    Pass scheduled_at as a unix timestamp to schedule it for later, or omit it
+    (defaults to None) to publish immediately — matches the frontend's createPost flow.
+    """
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    try:
+        res = requests.post(
+            f"{BACKEND_URL}/posts/{post_id}/publish",
+            json={"scheduled_at": scheduled_at},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {auth['access_token']}"
+            }
         )
 
-    if resp.status_code >= 400:
-        body_text = resp.text
-        if resp.status_code == 401:
-            raise ToolError("Token expired. Sign in again.")
-        if resp.status_code == 402:
-            raise ToolError("Plan limit reached.")
-        raise ToolError(f"Backend error {resp.status_code}: {body_text}")
+        if res.status_code not in [200, 201, 202]:
+            return f"Failed to publish post '{post_id}'. Status: {res.status_code}. Response: {res.text}"
 
-    return resp.json()
+        return f"Successfully published post '{post_id}':\n{json.dumps(res.json(), indent=2)}"
+    except Exception as e:
+        return f"An error occurred while publishing the post: {str(e)}"
 
 
-# ── Tools ──
-@mcp.tool(description="View your OnScript profile")
-async def get_profile() -> str:
-    data = await api("/users/profile")
-    return json.dumps(data, indent=2)
+@mcp.tool
+async def check_upload_status(email: str, file_id: str) -> str:
+    """Checks the processing status (e.g., PENDING, READY, FAILED) of an uploaded media file."""
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    try:
+        res = requests.get(
+            f"{BACKEND_URL}/storage/files/{file_id}",
+            headers={"Authorization": f"Bearer {auth['access_token']}"}
+        )
+        
+        if res.status_code != 200:
+            return f"Failed to check status for file '{file_id}'. Status: {res.status_code}."
+            
+        return f"File upload status:\n{json.dumps(res.json(), indent=2)}"
+    except Exception as e:
+        return f"An error occurred while checking file status: {str(e)}"
 
 
-@mcp.tool(description="Create a post on OnScript. Detects connected accounts automatically.")
-async def create_post(
-    content: Annotated[str, Field(description="Post content text")],
-    status: Annotated[
-        Literal["DRAFT", "PUBLISHING", "SCHEDULED"],
-        Field(
-            description=(
-                "DRAFT saves without posting, PUBLISHING posts immediately, "
-                "SCHEDULED requires scheduled_at"
+@mcp.tool
+async def create_draft(email: str, text: str, platforms: List[str], media_ids: List[str] = None) -> str:
+    """
+    Creates a drafted post for the specified platforms.
+    platforms should be a list like ["TWITTER", "LINKEDIN"].
+    Each platform must already have a connected account — use connect_social_account first if not.
+    """
+    auth, err = get_user_auth(email)
+    if err: return err
+    
+    if media_ids is None:
+        media_ids = []
+
+    try:
+        # Resolve a connected_account_id for each requested platform — the backend
+        # rejects drafts that omit it (this was the original 400 we were hitting).
+        accounts_res = requests.get(
+            f"{BACKEND_URL}/integrations/connected-accounts",
+            headers={"Authorization": f"Bearer {auth['access_token']}"}
+        )
+        if accounts_res.status_code != 200:
+            return f"Failed to look up connected accounts. Status: {accounts_res.status_code}."
+
+        connected_accounts = accounts_res.json().get("data", [])
+        account_by_platform = {}
+        for acc in connected_accounts:
+            if not acc.get("is_active"):
+                continue
+            plat = (acc.get("platform") or "").upper()
+            # Prefer the primary account if a platform has more than one connected.
+            if plat not in account_by_platform or acc.get("is_primary"):
+                account_by_platform[plat] = acc.get("id")
+
+        missing = [p for p in platforms if p.upper() not in account_by_platform]
+        if missing:
+            return (
+                f"Can't create draft — no connected account for: {', '.join(missing)}. "
+                f"Use connect_social_account to link {'them' if len(missing) > 1 else 'it'} first."
             )
-        ),
-    ],
-    scheduled_at: Annotated[
-        Optional[int],
-        Field(description="Unix epoch in seconds. Required if status is SCHEDULED"),
-    ] = None,
-) -> str:
-    accounts: list[dict[str, Any]] = await api("/integrations/connected-accounts")
-    active = [a for a in accounts if a.get("is_active")]
-    if not active:
-        raise ToolError("No connected social accounts. Connect one in the webapp first.")
-    primary = next((a for a in active if a.get("is_primary")), active[0])
 
-    platform_map = {
-        "twitter": "TWITTER",
-        "x": "TWITTER",
-        "linkedin": "LINKEDIN",
-        "farcaster": "FARCASTER",
-        "facebook": "FACEBOOK",
-        "instagram": "INSTAGRAM",
-        "youtube": "YOUTUBE",
-        "tiktok": "TIKTOK",
-    }
-    platform_name = platform_map.get(str(primary["platform"]).lower(), str(primary["platform"]).upper())
-
-    body: dict[str, Any] = {
-        "status": status,
-        "platforms": [
-            {
-                "platform": platform_name,
-                "connected_account_id": primary["id"],
-                "text": content,
-                "media_ids": [],
-            }
-        ],
-    }
-    if status == "SCHEDULED":
-        if not scheduled_at:
-            raise ToolError("scheduled_at (unix seconds) is required for SCHEDULED posts")
-        body["scheduled_at"] = scheduled_at
-
-    result = await api("/posts", method="POST", json_body=body)
-    return json.dumps(result, indent=2)
-
-
-@mcp.tool(description="List your posts")
-async def list_posts(
-    limit: Annotated[Optional[int], Field(description="Number of posts")] = None,
-    status: Annotated[Optional[str], Field(description="Filter by status")] = None,
-) -> str:
-    params: dict[str, str] = {}
-    if limit is not None:
-        params["limit"] = str(limit)
-    if status is not None:
-        params["status"] = status
-    query = f"?{urlencode(params)}" if params else ""
-    data = await api(f"/posts{query}")
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool(description="Get a specific post")
-async def get_post(post_id: Annotated[str, Field(description="Post ID")]) -> str:
-    data = await api(f"/posts/{post_id}")
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool(description="See connected social platforms")
-async def get_connected_accounts() -> str:
-    data = await api("/integrations/connected-accounts")
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool(description="View posting analytics")
-async def get_analytics(
-    period: Annotated[Optional[str], Field(description="Time period (7d, 30d, 90d)")] = None,
-) -> str:
-    query = f"?period={period}" if period else ""
-    data = await api(f"/users/profile/analytics{query}")
-    return json.dumps(data, indent=2)
-
-
-@mcp.tool(description="Check if authentication token is set")
-def check_token() -> str:
-    return json.dumps({"hasToken": bool(_access_token)}, indent=2)
-
-
-# ── Token status resource (read it again after a refresh; see the note above
-#    save_token for why this can't be pushed to clients the way the TS
-#    version does) ──
-@mcp.resource(
-    uri="onscript://token-status",
-    description="Current authentication token status",
-    mime_type="application/json",
-)
-def token_status() -> str:
-    return json.dumps(
-        {
-            "hasToken": bool(_access_token),
-            "lastUpdated": datetime.now(timezone.utc).isoformat(),
+        payload = {
+            "status": "DRAFT",
+            "platforms": [
+                {
+                    "platform": p.upper(),
+                    "connected_account_id": account_by_platform[p.upper()],
+                    "text": text,
+                    "media_ids": media_ids,
+                } for p in platforms
+            ]
         }
-    )
 
-
-def main() -> None:
-    if _access_token:
-        log(f"Token loaded: {_access_token[:16]}...")
-    else:
-        log("No token — sign in to webapp to send one")
-
-    start_token_server()
-    mcp.run()  # stdio transport by default
-
-
+        res = requests.post(
+            f"{BACKEND_URL}/posts",
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {auth['access_token']}"
+            }
+        )
+        
+        if res.status_code not in [200, 201, 202]:
+            return f"Failed to create draft. Status: {res.status_code}. Response: {res.text}"
+            
+        return f"Draft created successfully:\n{json.dumps(res.json(), indent=2)}"
+    except Exception as e:
+        return f"An error occurred while creating the draft: {str(e)}"
 if __name__ == "__main__":
-    main()
+    mcp.run()
