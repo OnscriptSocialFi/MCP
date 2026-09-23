@@ -1,0 +1,24 @@
+commit b0da9404f1373ddbbea9a49d8974f7d23523df10
+Author: Lawrence <lawuche29@gmail.com>
+Date:   Mon Sep 14 02:48:05 2026 +0100
+
+    feat:adding auth
+
+diff --git a/server.py b/server.py
+index b41617e..5ad251d 100644
+--- a/server.py
++++ b/server.py
+@@ -170,6 +170,13 @@ async def api(
+ 
+ 
+ # ── Tools ──
++
++@mcp.tool(description="Email Sign in")
++async def email_sign_in(email:str) -> str:
++    print(email)
++    data = await api("/users/profile")
++    return json.dumps(data, indent=2)
++
+ @mcp.tool(description="View your OnScript profile")
+ async def get_profile() -> str:
+     data = await api("/users/profile")
