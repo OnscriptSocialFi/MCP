@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "onscript": {
+      "type": "streamable-http",
+      "url": "https://mcp.onscript.xyz",
+      "description": "Onscript MCP server — AI agents interact with your Onscript account via natural language"
+    }
+  }
+}
