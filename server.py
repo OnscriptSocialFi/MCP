@@ -14,7 +14,7 @@ from utils import sanitize_auth_payload
 load_dotenv()
 
 BACKEND_URL = os.getenv("BACKEND_URL")
-MCP_URL = os.getenv("MCP_URL")
+MCP_PORT = int(os.getenv("MCP_PORT"))
 REDIS_PORT = os.getenv("REDIS_PORT")
 # Base URL of the OnScript web app — used to build the OAuth connect link
 # that gets returned to the caller (mirrors extendsSocialsConnect on the frontend).
@@ -331,4 +331,7 @@ async def create_draft(email: str, text: str, platforms: List[str], media_ids: L
     except Exception as e:
         return f"An error occurred while creating the draft: {str(e)}"
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="http",
+        host="127.0.0.1",
+        port=MCP_PORT,       # whatever port your reverse proxy forwards to
+        path="/")
