@@ -1,6 +1,9 @@
-import asyncio
+ import asyncio
+import base64
 import json
+import mimetypes
 import os
+from pathlib import Path
 from typing import List
 from mcp.types import Icon
 
@@ -241,6 +244,93 @@ async def publish_post(email: str, post_id: str, scheduled_at: int = None) -> st
         return f"Successfully published post '{post_id}':\n{json.dumps(res.json(), indent=2)}"
     except Exception as e:
         return f"An error occurred while publishing the post: {str(e)}"
+
+
+@mcp.tool
+async def upload_media(
+    email: str,
+    file_path: str = None,
+    file_base64: str = None,
+    file_name: str = None,
+) -> str:
+    """
+    Uploads an image or video so it can be attached to a post.
+
+    Provide either:
+      - file_path: an absolute path to a file readable by the MCP server, or
+      - file_base64 together with file_name: raw file bytes as base64 plus the
+        original filename (used to guess content type and keep the extension).
+
+    Mirrors the frontend's signed-upload flow: fetches a signed Cloudinary
+    upload payload from the backend (GET /storage/signature), then posts the
+    file straight to Cloudinary using that signature — the backend never
+    receives the raw bytes directly.
+
+    Returns a file_id. The file may still be processing right after this
+    returns — poll check_upload_status(email, file_id) until it reports READY
+    before passing file_id in create_draft's media_ids.
+    """
+    auth, err = get_user_auth(email)
+    if err: return err
+
+    if not file_path and not (file_base64 and file_name):
+        return "Provide either file_path, or both file_base64 and file_name."
+
+    try:
+        if file_path:
+            p = Path(file_path).expanduser()
+            if not p.is_file():
+                return f"File not found: {file_path}"
+            file_bytes = p.read_bytes()
+            resolved_name = p.name
+        else:
+            try:
+                file_bytes = base64.b64decode(file_base64, validate=True)
+            except Exception:
+                return "file_base64 could not be decoded — make sure it's valid base64."
+            resolved_name = file_name
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+    mime_type, _ = mimetypes.guess_type(resolved_name)
+    if not mime_type or not (mime_type.startswith("image/") or mime_type.startswith("video/")):
+        return (
+            f"Unsupported or unrecognized file type for '{resolved_name}' "
+            f"(guessed: {mime_type or 'unknown'}) — only images and videos are supported."
+        )
+
+    try:
+        sig_res = requests.get(
+            f"{BACKEND_URL}/storage/signature",
+            headers={"Authorization": f"Bearer {auth['access_token']}"}
+        )
+        if sig_res.status_code != 200:
+            return f"Failed to get upload signature. Status: {sig_res.status_code}."
+        sig_data = sig_res.json()
+    except Exception as e:
+        return f"Error requesting upload signature: {str(e)}"
+
+    upload_url = sig_data.get("upload_url")
+    payload = sig_data.get("payload") or {}
+    file_id = sig_data.get("id")
+
+    if not upload_url or not file_id:
+        return f"Malformed signature response, missing upload_url or id: {json.dumps(sig_data)}"
+
+    try:
+        form_fields = {k: str(v) for k, v in payload.items()}
+        files = {"file": (resolved_name, file_bytes, mime_type)}
+        upload_res = requests.post(upload_url, data=form_fields, files=files)
+        if upload_res.status_code not in (200, 201):
+            return f"Upload to storage provider failed. Status: {upload_res.status_code}. Response: {upload_res.text}"
+    except Exception as e:
+        return f"Error uploading file: {str(e)}"
+
+    return (
+        f"Upload successful. file_id={file_id}. It may still be processing — "
+        f"call check_upload_status(email, '{file_id}') until it reports READY, "
+        f"then pass '{file_id}' in create_draft's media_ids."
+    )
 
 
 @mcp.tool
