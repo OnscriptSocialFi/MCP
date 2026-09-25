@@ -1,4 +1,4 @@
- import asyncio
+import asyncio
 import base64
 import json
 import mimetypes
@@ -318,7 +318,12 @@ async def upload_media(
         return f"Malformed signature response, missing upload_url or id: {json.dumps(sig_data)}"
 
     try:
-        form_fields = {k: str(v) for k, v in payload.items()}
+        # Cloudinary signs JS String(value) semantics: booleans must be
+        # "true"/"false" — Python's str(True) == "True" breaks the signature.
+        form_fields = {
+            k: ("true" if v is True else "false" if v is False else str(v))
+            for k, v in payload.items()
+        }
         files = {"file": (resolved_name, file_bytes, mime_type)}
         upload_res = requests.post(upload_url, data=form_fields, files=files)
         if upload_res.status_code not in (200, 201):
