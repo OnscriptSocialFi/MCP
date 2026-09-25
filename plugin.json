@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "onscript",
+  "version": "0.1.0",
+  "description": "Create, schedule and analyze posts across social platforms using AI agents",
+  "homepage": "https://onscript.xyz",
+  "repository": "https://github.com/OnscriptSocialFi/MCP",
+  "keywords": ["mcp-server", "social-media", "crossposting"]
+}
